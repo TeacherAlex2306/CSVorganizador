@@ -9,17 +9,17 @@
 </head>
 <body><main class="wrap"><div class="panel">
 <h1>Ordenar calificaciones</h1>
-<p>Sube tu Excel de grupos y el CSV de Moodle. El CSV resultante conservará <b>todas las columnas y calificaciones originales</b>, pero sus filas seguirán el orden de los alumnos en la <b>columna B de cada pestaña</b> del Excel.</p>
+<p>Sube tu archivo de lista (Excel o CSV) y el archivo de calificaciones (Excel o CSV). El CSV resultante conservará <b>todas las columnas y calificaciones originales</b>, pero sus filas seguirán el orden de los alumnos en la <b>columna B de cada hoja</b> o archivo CSV de referencia.</p>
 <div class="files">
-<label class="file"><strong>1. Excel con los grupos</strong><input id="excel" type="file" accept=".xlsx,.xls,.xlsm,.ods"><small id="excelName">Se revisarán todas sus pestañas, en orden.</small></label>
-<label class="file"><strong>2. CSV de calificaciones</strong><input id="csv" type="file" accept=".csv,text/csv"><small id="csvName">Se usará automáticamente «Nombre completo».</small></label>
+<label class="file"><strong>1. Lista de alumnos (Excel o CSV)</strong><input id="excel" type="file" ><small id="excelName">Se leerá la columna B de todas las hojas, o del CSV.</small></label>
+<label class="file"><strong>2. Archivo de calificaciones (Excel o CSV)</strong><input id="csv" type="file" ><small id="csvName">Se buscará automáticamente «Nombre completo».</small></label>
 </div>
 <div class="actions"><button id="run" disabled>Ordenar y descargar CSV</button><span class="hint">Sin columnas por configurar.</span></div>
 <div id="status" class="status hidden" role="status"></div>
-<section id="results" class="hidden"><div class="stats"><div class="stat"><b id="matched">0</b><span>Coincidencias ordenadas</span></div><div class="stat"><b id="noExcel">0</b><span>CSV sin encontrar en Excel</span></div><div class="stat"><b id="noCsv">0</b><span>Excel sin encontrar en CSV</span></div></div>
+<section id="results" class="hidden"><div class="stats"><div class="stat"><b id="matched">0</b><span>Coincidencias ordenadas</span></div><div class="stat"><b id="noExcel">0</b><span>Calificaciones sin encontrar en lista</span></div><div class="stat"><b id="noCsv">0</b><span>Lista sin encontrar en calificaciones</span></div></div>
 <div id="notice" class="notice hidden"></div>
-<details><summary>Alumnos del Excel sin coincidencia en CSV</summary><ul id="missing"></ul></details>
-<details><summary>Filas del CSV sin coincidencia segura (se agregan al final)</summary><ul id="extra"></ul></details>
+<details><summary>Alumnos de la lista sin coincidencia</summary><ul id="missing"></ul></details>
+<details><summary>Filas sin coincidencia segura (se agregan al final)</summary><ul id="extra"></ul></details>
 <details><summary>Vista previa del orden generado</summary><div class="scroll"><table><thead><tr><th>#</th><th>Nombre completo (CSV)</th><th>Calificación</th><th>Origen</th></tr></thead><tbody id="preview"></tbody></table></div></details>
 </section>
 </div><p class="caption">Los archivos se procesan en tu navegador. Para leer Excel se utiliza la biblioteca SheetJS desde una CDN; la primera carga requiere Internet.</p></main>
@@ -28,31 +28,60 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const excel = $('excel'), csv = $('csv'), run = $('run');
-function state(){run.disabled=!(excel.files.length&&csv.files.length);$('excelName').textContent=excel.files[0]?.name||'Se revisarán todas sus pestañas, en orden.';$('csvName').textContent=csv.files[0]?.name||'Se usará automáticamente «Nombre completo».';$('results').classList.add('hidden');$('status').classList.add('hidden')}
+function state(){run.disabled=!(excel.files.length&&csv.files.length);$('excelName').textContent=excel.files[0]?.name||'Se leerá la columna B de todas las hojas, o del CSV.';$('csvName').textContent=csv.files[0]?.name||'Se buscará automáticamente «Nombre completo».';$('results').classList.add('hidden');$('status').classList.add('hidden')}
 excel.addEventListener('change',state);csv.addEventListener('change',state);
 function status(s,type=''){const el=$('status');el.textContent=s;el.className='status '+type}
 function norm(s){return String(s??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9ñ\s]/g,' ').replace(/\s+/g,' ').trim()}
-function key(s){return norm(s).split(' ').filter(Boolean).sort().join('|')}
+function tokens(s){return norm(s).split(' ').filter(Boolean)}
+function key(s){return tokens(s).sort().join('|')}
+const invalidLabels = new Set(['uco','etimologias i','nombre del alumno','nombre completo','nombre','alumno','alumnos','grupo','materia','actividades de clase','apellido nombre','apellidos y nombres','estudiante','lista de alumnos','calificacion','numero de lista']);
+function validName(s){const n=norm(s);const t=tokens(s);return t.length>=3&&!invalidLabels.has(n)&&t.every(x=>/[a-z]/.test(x))&&!/^(grupo|materia|actividad|tarea|examen|evaluacion|promedio|calificacion|nombre|semestre|preparatoria|bachillerato|lista)\b/.test(n)}
+function includesAll(big,small){let b=[...big];for(const x of small){const i=b.indexOf(x);if(i<0)return false;b.splice(i,1)}return true}
+// Confirma dos apellidos y al menos un nombre, con tolerancia a segundo nombre ausente.
+function compatibility(refName, csvName){const a=tokens(refName),b=tokens(csvName);if(a.length<3||b.length<3)return 0;if(key(refName)===key(csvName))return 100;
+ const shorter=a.length<=b.length?a:b,longer=a.length<=b.length?b:a;
+ if(!includesAll(longer,shorter))return 0;
+ // El CSV de Moodle suele ser «Nombre(s) Apellido1 Apellido2».
+ // La lista escolar suele ser «Apellido1 Apellido2 Nombre(s)».
+ const refSurnames=a.slice(0,2),csvSurnames=b.slice(-2);
+ const surnameAgreement=includesAll(csvSurnames,refSurnames)&&includesAll(refSurnames,csvSurnames);
+ const refGiven=a.slice(2),csvGiven=b.slice(0,-2);
+ if(surnameAgreement&&refGiven.some(t=>csvGiven.includes(t)))return 90;
+ // Respaldo para nombres y apellidos compuestos; exige 3 palabras comunes.
+ if(shorter.length>=3 && shorter.filter((t,i)=>longer.filter(x=>x===t).length>shorter.slice(0,i).filter(x=>x===t).length).length>=3)return 70;
+ return 0}
+function decodeFile(buf){const bytes=new Uint8Array(buf);try{return new TextDecoder('utf-8',{fatal:true}).decode(bytes)}catch{return new TextDecoder('windows-1252').decode(bytes)}}
+async function readRows(file){const ext=(file.name.split('.').pop()||'').toLowerCase();const buf=await file.arrayBuffer();if(ext==='csv'||ext==='txt'){const txt=decodeFile(buf);const parsed=parseCSV(txt);return {sheets:[{name:'CSV',rows:parsed.data}],delimiter:parsed.delimiter,kind:'csv'}}
+ if(typeof XLSX==='undefined')throw Error('No se pudo cargar la biblioteca para Excel. Comprueba tu conexión a Internet.');
+ const wb=XLSX.read(buf,{type:'array',cellDates:false});return {sheets:wb.SheetNames.map(name=>({name,rows:XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1,defval:'',raw:false,blankrows:false})})),delimiter:',',kind:'excel'}}
 function parseCSV(t){t=t.replace(/^\uFEFF/,'');let delimiter=',';let first=t.split(/\r?\n/,1)[0]||'';let counts={',':0,';':0,'\t':0};let quoted=false;for(let i=0;i<first.length;i++){if(first[i]==='"'){if(quoted&&first[i+1]==='"'){i++;continue}quoted=!quoted}else if(!quoted&&Object.hasOwn(counts,first[i]))counts[first[i]]++}delimiter=Object.entries(counts).sort((a,b)=>b[1]-a[1])[0][0];let data=[],row=[],field='',q=false;for(let i=0;i<t.length;i++){let c=t[i];if(q){if(c==='"'&&t[i+1]==='"'){field+='"';i++}else if(c==='"')q=false;else field+=c}else if(c==='"')q=true;else if(c===delimiter){row.push(field);field=''}else if(c==='\n'||c==='\r'){if(c==='\r'&&t[i+1]==='\n')i++;row.push(field);if(row.some(v=>v!==''))data.push(row);row=[];field=''}else field+=c}if(field!==''||row.length){row.push(field);data.push(row)}return {data,delimiter}}
 function quote(v,d){const s=String(v??'');return /["\r\n]/.test(s)||s.includes(d)?'"'+s.replace(/"/g,'""')+'"':s}
 function downloadCSV(rows,delimiter,filename){const body='\uFEFF'+rows.map(r=>r.map(v=>quote(v,delimiter)).join(delimiter)).join('\r\n')+'\r\n';const blob=new Blob([body],{type:'text/csv;charset=utf-8;'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}
 function items(container,values){container.replaceChildren();if(!values.length){const li=document.createElement('li');li.textContent='Ninguno';container.append(li);return}for(const v of values){const li=document.createElement('li');li.textContent=v;container.append(li)}}
 async function process(){run.disabled=true;$('results').classList.add('hidden');status('Leyendo archivos…');try{
-if(typeof XLSX==='undefined')throw Error('No cargó la biblioteca de Excel. Comprueba tu conexión a Internet y actualiza la página.');
-const wb=XLSX.read(await excel.files[0].arrayBuffer(),{type:'array',cellDates:false});
-let reference=[];for(const sheetName of wb.SheetNames){const ws=wb.Sheets[sheetName];const lines=XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:false,blankrows:false});for(let i=0;i<lines.length;i++){const name=String(lines[i][1]??'').trim();if(!name||norm(name)==='nombre'||norm(name)==='nombre completo'||norm(name)==='alumno'||norm(name)==='alumnos'||norm(name)==='apellidos y nombres')continue;reference.push({name,sheet:sheetName,row:i+1,k:key(name)})}}
-if(!reference.length)throw Error('No encontré nombres en la columna B de las pestañas del Excel.');
-let text=await csv.files[0].text();let {data,delimiter}=parseCSV(text);if(data.length<2)throw Error('El CSV está vacío o no tiene filas de alumnos.');
-const header=data[0];const ni=header.findIndex(h=>norm(h)==='nombre completo');if(ni<0)throw Error('El CSV no contiene la columna «Nombre completo». Encabezados encontrados: '+header.join(', '));
-const gradeIndex=header.findIndex(h=>norm(h)==='calificacion');const records=data.slice(1).map((row,i)=>({row,index:i,k:key(row[ni]),name:String(row[ni]??'')}));
-const groups=new Map();for(const rec of records){if(!rec.k)continue;if(!groups.has(rec.k))groups.set(rec.k,[]);groups.get(rec.k).push(rec)}
-let used=new Set(),ordered=[],missing=[],ambiguous=[];for(const r of reference){if(!r.k)continue;const candidates=(groups.get(r.k)||[]).filter(c=>!used.has(c.index));if(candidates.length===1){const v=candidates[0];used.add(v.index);ordered.push({rec:v,sheet:r.sheet})}else if(candidates.length>1){ambiguous.push(`${r.name} (${r.sheet}) — varias filas coinciden en el CSV`)}else{missing.push(`${r.name} (${r.sheet})`)}}
+const refFile=await readRows(excel.files[0]);const gradeFile=await readRows(csv.files[0]);
+let reference=[];for(const sheet of refFile.sheets){for(let i=0;i<sheet.rows.length;i++){const name=String(sheet.rows[i][1]??'').trim();if(!validName(name))continue;reference.push({name,sheet:sheet.name,row:i+1,k:key(name)})}}
+if(!reference.length)throw Error('No encontré nombres válidos en la columna B de la lista.');
+let gradeSheet=gradeFile.sheets.find(s=>s.rows.some(r=>r.some(v=>norm(v)==='nombre completo')));
+if(!gradeSheet)throw Error('No encontré el encabezado «Nombre completo» en el archivo de calificaciones.');
+const headerAt=gradeSheet.rows.findIndex(r=>r.some(v=>norm(v)==='nombre completo'));
+const header=gradeSheet.rows[headerAt];const ni=header.findIndex(v=>norm(v)==='nombre completo');
+const gradeIndex=header.findIndex(h=>norm(h)==='calificacion');
+const records=gradeSheet.rows.slice(headerAt+1).filter(r=>r.some(v=>String(v??'').trim()!=='')).map((row,i)=>({row,index:i,k:key(row[ni]),name:String(row[ni]??'')}));
+const used=new Set(),ordered=[],missing=[],ambiguous=[];
+for(const r of reference){
+ let candidates=records.filter(c=>!used.has(c.index)&&validName(c.name)).map(rec=>({rec,score:compatibility(r.name,rec.name)})).filter(x=>x.score>0);
+ if(!candidates.length){missing.push(`${r.name} (${r.sheet})`);continue}
+ const best=Math.max(...candidates.map(x=>x.score));const bestCandidates=candidates.filter(x=>x.score===best);
+ if(bestCandidates.length!==1){ambiguous.push(`${r.name} (${r.sheet}) — posibles: ${bestCandidates.map(x=>x.rec.name).join(' / ')}`);continue}
+ const v=bestCandidates[0].rec;used.add(v.index);ordered.push({rec:v,sheet:r.sheet});
+}
 const extras=records.filter(r=>!used.has(r.index));const output=[header,...ordered.map(o=>o.rec.row),...extras.map(r=>r.row)];
 $('matched').textContent=ordered.length;$('noExcel').textContent=extras.length;$('noCsv').textContent=missing.length+ambiguous.length;
-items($('missing'),[...missing,...ambiguous]);items($('extra'),extras.map(x=>x.name||`Fila CSV ${x.index+2} (sin nombre)`));
-const note=$('notice');let notes=[];if(extras.length)notes.push(`${extras.length} fila(s) del CSV quedaron al final, sin modificar, porque no se encontró una correspondencia única en el Excel.`);if(missing.length||ambiguous.length)notes.push(`${missing.length+ambiguous.length} nombre(s) del Excel no obtuvieron una coincidencia única en el CSV.`);note.textContent=notes.join(' ');note.classList.toggle('hidden',!notes.length);
+items($('missing'),[...missing,...ambiguous]);items($('extra'),extras.map(x=>x.name||`Fila de calificaciones ${x.index+2} (sin nombre)`));
+const note=$('notice');let notes=[];if(extras.length)notes.push(`${extras.length} fila(s) quedaron al final por no tener coincidencia segura.`);if(missing.length||ambiguous.length)notes.push(`${missing.length+ambiguous.length} nombre(s) de la lista quedaron sin coincidencia única.`);note.textContent=notes.join(' ');note.classList.toggle('hidden',!notes.length);
 const tbody=$('preview');tbody.replaceChildren();for(const [i,entry] of [...ordered.map(x=>({rec:x.rec,sheet:x.sheet})),...extras.map(rec=>({rec,sheet:'Sin coincidencia'}))].slice(0,150).entries()){const tr=document.createElement('tr');for(const v of [i+1,entry.rec.name,gradeIndex>=0?entry.rec.row[gradeIndex]:'—',entry.sheet]){const td=document.createElement('td');td.textContent=v;tr.append(td)}tbody.append(tr)}
-$('results').classList.remove('hidden');let base=csv.files[0].name.replace(/\.csv$/i,'');downloadCSV(output,delimiter,base+'_ORDENADO.csv');status(`CSV descargado. ${ordered.length} alumnos ordenados según el Excel. ${extras.length} filas no encontradas se conservaron al final. Total original: ${records.length}; total exportado: ${output.length-1}.`,'ok');
+$('results').classList.remove('hidden');let base=csv.files[0].name.replace(/\.[^.]+$/,'');downloadCSV(output,gradeFile.kind==='csv'?gradeFile.delimiter:',',base+'_ORDENADO.csv');status(`CSV descargado. ${ordered.length} alumnos ordenados. ${extras.length} filas no encontradas al final. Total original: ${records.length}; total exportado: ${output.length-1}.`,'ok');
 }catch(e){console.error(e);status('No se pudo procesar: '+e.message,'error')}finally{stateButton()}}
 function stateButton(){run.disabled=!(excel.files.length&&csv.files.length)}run.addEventListener('click',process);
 </script></body></html>
